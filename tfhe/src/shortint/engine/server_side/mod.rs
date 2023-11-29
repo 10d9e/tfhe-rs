@@ -29,6 +29,26 @@ mod scalar_sub;
 mod shift;
 mod sub;
 
+fn trivial_pbs_assign(server_key: &ServerKey, ct: &mut Ciphertext, acc: &LookupTableOwned) {
+    assert_eq!(ct.noise_level(), NoiseLevel::ZERO);
+    let modulus_sup = server_key.message_modulus.0 * server_key.carry_modulus.0;
+    let delta = (1_u64 << 63) / (server_key.message_modulus.0 * server_key.carry_modulus.0) as u64;
+    let ct_value = *ct.ct.get_body().data / delta;
+
+    let box_size = server_key.bootstrapping_key.polynomial_size().0 / modulus_sup;
+    let result = if ct_value >= modulus_sup as u64 {
+        // padding bit is 1
+        let ct_value = ct_value % modulus_sup as u64;
+        let index_in_lut = ct_value as usize * box_size;
+        acc.acc.get_body().as_ref()[index_in_lut].wrapping_neg()
+    } else {
+        let index_in_lut = ct_value as usize * box_size;
+        acc.acc.get_body().as_ref()[index_in_lut]
+    };
+    *ct.ct.get_mut_body().data = result;
+    ct.degree = acc.degree;
+}
+
 impl ShortintEngine {
     pub(crate) fn new_server_key(&mut self, cks: &ClientKey) -> ServerKey {
         // Plaintext Max Value
@@ -291,13 +311,17 @@ impl ShortintEngine {
             pbs_order: cks.parameters.encryption_key_choice().into(),
         }
     }
-
     pub(crate) fn keyswitch_programmable_bootstrap_assign(
         &mut self,
         server_key: &ServerKey,
         ct: &mut Ciphertext,
         acc: &LookupTableOwned,
     ) {
+        if ct.is_trivial() {
+            trivial_pbs_assign(server_key, ct, acc);
+            return;
+        }
+
         // Compute the programmable bootstrapping with fixed test polynomial
         let (mut ciphertext_buffers, buffers) = self.get_buffers(server_key);
 
@@ -549,6 +573,11 @@ impl ShortintEngine {
         ct: &mut Ciphertext,
         acc: &LookupTableOwned,
     ) {
+        if ct.is_trivial() {
+            trivial_pbs_assign(server_key, ct, acc);
+            return;
+        }
+
         let (mut ciphertext_buffers, buffers) = self.get_buffers(server_key);
 
         match &server_key.bootstrapping_key {
@@ -680,6 +709,16 @@ impl ShortintEngine {
         value: u64,
         ciphertext_modulus: CiphertextModulus<u64>,
     ) -> Ciphertext {
+        let modular_value = value % server_key.message_modulus.0 as u64;
+        self.unchecked_create_trivial(server_key, modular_value, ciphertext_modulus)
+    }
+
+    pub(crate) fn unchecked_create_trivial(
+        &mut self,
+        server_key: &ServerKey,
+        value: u64,
+        ciphertext_modulus: CiphertextModulus<u64>,
+    ) -> Ciphertext {
         let lwe_size = match server_key.pbs_order {
             PBSOrder::KeyswitchBootstrap => server_key
                 .bootstrapping_key
@@ -691,12 +730,10 @@ impl ShortintEngine {
                 .to_lwe_size(),
         };
 
-        let modular_value = value as usize % server_key.message_modulus.0;
-
         let delta =
             (1_u64 << 63) / (server_key.message_modulus.0 * server_key.carry_modulus.0) as u64;
 
-        let shifted_value = (modular_value as u64) * delta;
+        let shifted_value = value * delta;
 
         let encoded = Plaintext(shifted_value);
 
@@ -706,7 +743,7 @@ impl ShortintEngine {
             ciphertext_modulus,
         );
 
-        let degree = Degree(modular_value);
+        let degree = Degree(value as usize);
 
         Ciphertext::new(
             ct,

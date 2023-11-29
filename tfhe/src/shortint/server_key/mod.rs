@@ -902,6 +902,11 @@ impl ServerKey {
         })
     }
 
+    pub fn unchecked_create_trivial(&self, value: u64) -> Ciphertext {
+        ShortintEngine::with_thread_local_mut(|engine| {
+            engine.unchecked_create_trivial(self, value, self.ciphertext_modulus)
+        })
+    }
     pub fn create_trivial_assign(&self, ct: &mut Ciphertext, value: u64) {
         ShortintEngine::with_thread_local_mut(|engine| {
             engine.create_trivial_assign(self, ct, value);
